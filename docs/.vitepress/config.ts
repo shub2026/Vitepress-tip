@@ -17,6 +17,7 @@ export default withMermaid(
       ['meta', { property: 'og:description', content: '基于 VitePress 的极简风格知识分享平台' }],
     ],
     base: '/',
+    ignoreDeadLinks: true,
     title: "知行笔记",
     description: "基于 VitePress 的极简风格知识分享平台，知行合一，止于至善",
     lang: 'zh-CN',
@@ -83,6 +84,26 @@ export default withMermaid(
         { text: `VitePress ${ devDependencies.vitepress.replace('^','') }`, link: 'https://vitepress.dev/zh/', noIcon: true },
       ],
       sidebar: [
+        {
+          text: 'KEC平台',
+          collapsed: false,
+          items: [
+            // 入门
+            { text: '平台说明', link: '/kec/kec-manager' },
+            // 部署与运维
+            { text: '部署与运维指南', link: '/kec/deployment' },
+            // 核心算法
+            { text: '排课算法完整说明', link: '/kec/scheduling_algorithm' },
+            // 技术专题
+            { text: '学期计算逻辑', link: '/kec/semester-calculation' },
+            { text: '代码格式化指南', link: '/kec/code_formatting' },
+            { text: '命名规范迁移', link: '/kec/naming_convention_migration' },
+            // 变更
+            { text: '版本管理指南', link: '/kec/version_management' },
+            { text: '变更日志', link: '/kec/changelog' },
+          ],
+        },
+
         {
           text: '构建指南',
           items: [
