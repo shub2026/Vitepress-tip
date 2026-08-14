@@ -119,6 +119,7 @@ export default withMermaid(
             { text: 'Gitee Go流水线', link: '/vite/gitee-go-deploy' },
             { text: 'Gitee Go优化V2', link: '/vite/gitee-go-deploy-v2' },
             { text: 'Markdown语法', link: '/vite/markdown-syntax' },
+            { text: 'Docker部署(本站)', link: '/vite/docker-deploy' },
           ]
         },
         {

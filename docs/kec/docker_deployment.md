@@ -1,3 +1,9 @@
+::: warning 本文档适用范围
+本指南针对 **KEC 课程管理平台**（独立后端项目：Node + Express + SQLite + Prisma），**不是**「知行笔记」文档站点（vitepress-tip）本身的部署。
+
+若你要容器化的是**本站文档**（纯静态 VitePress，无后端），请看 [Docker 部署（本站）](/vite/docker-deploy)。
+:::
+
 # KEC 课程管理平台 - Docker 部署指南
 
 ## 概述

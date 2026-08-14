@@ -1,0 +1,7 @@
+node_modules
+docs/.vitepress/dist
+.git
+.gitignore
+*.log
+deploy.sh
+deploy-web-v2.sh

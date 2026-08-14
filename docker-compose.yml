@@ -1,0 +1,8 @@
+services:
+  vitepress:
+    build: .
+    image: sntip-vitepress:latest
+    container_name: sntip-vitepress
+    ports:
+      - "8080:80"
+    restart: unless-stopped
