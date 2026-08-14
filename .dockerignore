@@ -1,6 +1,5 @@
 node_modules
 docs/.vitepress/dist
-.git
 .gitignore
 *.log
 deploy.sh

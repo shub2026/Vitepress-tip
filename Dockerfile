@@ -1,6 +1,8 @@
 # ---- 构建阶段 ----
 FROM node:20-alpine AS build
 WORKDIR /app
+# VitePress 的 lastUpdated 功能依赖 git 获取文件最后提交时间
+RUN apk add --no-cache git
 COPY package*.json ./
 RUN npm install
 COPY . .

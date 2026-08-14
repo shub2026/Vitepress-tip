@@ -103,6 +103,19 @@ docker compose up -d --build
 
 ## 常见问题
 
+### 构建报错 `spawn git ENOENT` / `not a git repository`
+
+本站 `config.ts` 开启了 `lastUpdated`（"最后更新于"），VitePress 在构建时会对每个 `.md` 执行 `git log` 取最后提交时间。
+因此构建环境**必须能访问 git 与 `.git` 目录**，否则会失败：
+
+- 报错 `spawn git ENOENT` → 构建镜像里没有 git。当前 `Dockerfile` 的 build 阶段已 `apk add --no-cache git` 解决；
+- 报错 `not a git repository` / `fatal: not a git repository` → 构建上下文里没有 `.git`。
+  当前 `.dockerignore` **不再排除 `.git`**（已移除该行），`COPY . .` 会把仓库历史带进构建阶段。
+  `.git` 只存在于构建阶段，最终 `nginx:alpine` 镜像只拷贝了 `dist`，**不会**把 `.git` 打进发布镜像，体积不受影响。
+
+> 如果你确实不想在容器里依赖 git（例如精简镜像），可把 `config.ts` 的 `lastUpdated` 设为 `false`，
+> 并恢复 `.dockerignore` 里的 `.git` 排除行。这会丢失页面下方的"最后更新于"时间。
+
 ### 页面 404 / 链接打不开
 
 - 本站 `base: '/'`，nginx.conf 已用 `try_files $uri $uri.html $uri/` 兼容 VitePress 默认带 `.html` 的链接。
