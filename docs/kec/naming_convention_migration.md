@@ -4,7 +4,7 @@
 
 ## 背景
 
-项目采用「后端 snake_case + 前端 camelCase + 中间件自动转换」模式，由 [server/src/middleware/naming.middleware.js](https://gitee.com/shub77/kec-manager/blob/main/server/src/middleware/naming.middleware.js) 实现。该模式在历史迭代中反复出现功能异常，根因是中间件存在固有缺陷。
+项目采用「后端 snake_case + 前端 camelCase + 中间件自动转换」模式，由 [server/src/middleware/naming.middleware.js](../server/src/middleware/naming.middleware.js) 实现。该模式在历史迭代中反复出现功能异常，根因是中间件存在固有缺陷。
 
 ## 当前机制与固有缺陷
 
@@ -87,7 +87,7 @@ export const getUsers = async () => {
 
 #### 1.1 后端：naming 中间件加 dev warning
 
-[server/src/middleware/naming.middleware.js](https://gitee.com/shub77/kec-manager/blob/main/server/src/middleware/naming.middleware.js) 新增 `detectDoubleConversion`，dev 环境下检测请求 body 中已是 snake_case 的字段（会被中间件二次转换产生双下划线），打印 warning 帮助定位前后端命名不一致。
+[server/src/middleware/naming.middleware.js](../server/src/middleware/naming.middleware.js) 新增 `detectDoubleConversion`，dev 环境下检测请求 body 中已是 snake_case 的字段（会被中间件二次转换产生双下划线），打印 warning 帮助定位前后端命名不一致。
 
 需重启 Node 服务生效。
 
@@ -129,7 +129,7 @@ export const getUsers = async () => {
 
 #### 2.1 扩展 naming 中间件处理 req.query
 
-[server/src/middleware/naming.middleware.js](https://gitee.com/shub77/kec-manager/blob/main/server/src/middleware/naming.middleware.js) 的 `convertRequestNaming` 新增 query params 处理：将前端发的 camelCase query key 转成 snake_case，供后端读取。
+[server/src/middleware/naming.middleware.js](../server/src/middleware/naming.middleware.js) 的 `convertRequestNaming` 新增 query params 处理：将前端发的 camelCase query key 转成 snake_case，供后端读取。
 
 实现细节：Express 5 中 `req.query` 是 getter-only，不能整体赋值，需原地删除旧 key 再设置新 key。
 
@@ -188,7 +188,7 @@ Prisma schema 字段级 `@map` 注解的工作量评估：
 
 ### 第三阶段（最后）— 清理
 
-1. 全部模块迁移完成后，移除 [server/src/middleware/naming.middleware.js](https://gitee.com/shub77/kec-manager/blob/main/server/src/middleware/naming.middleware.js) 和 [server/src/utils/naming.js](https://gitee.com/shub77/kec-manager/blob/main/server/src/utils/naming.js)
+1. 全部模块迁移完成后，移除 [server/src/middleware/naming.middleware.js](../server/src/middleware/naming.middleware.js) 和 [server/src/utils/naming.js](../server/src/utils/naming.js)
 2. 删除 `server/src/app.js` 中的 `convertRequestNaming` / `convertResponseNaming` 注册
 
 ## 立即可做的防御措施

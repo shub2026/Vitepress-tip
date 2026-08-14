@@ -1,9 +1,10 @@
 # KEC 排课算法与教材内聚策略完整说明
 
 > 主代码：`server/src/services/arrange/auto-arrange.js`
-> 配置：`server/src/constants/index.js`（`TEXTBOOK_COHESION`）
-> 版本：v1.3.0
-> 分析对象：`server/src/services/arrange/` 目录（`auto-arrange.js`、`queries.js`、`batch.js`、`validate.js`）
+> 优化服务：`server/src/services/arrange/optimize.js`
+> 配置：`server/src/constants/index.js`（`TEXTBOOK_COHESION`、`TABU_SEARCH`）
+> 版本：v1.0.0（正式发布版，2026-07-30 版本基线重置）
+> 分析对象：`server/src/services/arrange/` 目录（`auto-arrange.js`、`optimize.js`、`queries.js`、`batch.js`、`validate.js`、`tabu-search.js`）
 
 ---
 
@@ -17,6 +18,7 @@
 | `arrange/validate.js`         | 课时设置校验                               | `validateHourSettings`                                                                                                                                                                                                               |
 | `arrange/auto-arrange.js`     | 排课主算法、评分、置换回溯、结果构建、统计 | **导出**：`autoArrange`、`batchLocks`、`calcMatchScore`、`isTeacherEligible`、`calcAllMatchRates`、`diagnoseFailure`、`selectBestTeacher`、`trySwapOne`；**内部函数**：`buildTeacherConstraints`、`trySwapUnassigned`、`buildResult` |
 | `arrange/tabu-search.js`      | 禁忌搜索优化层（可选）                     | `tabuOptimize`（Insert/Shift/Swap 邻域、禁忌表、aspiration criterion）                                                                                                                                                               |
+| `arrange/optimize.js`         | 排课优化服务（跨课程全局优化，可选）       | **导出**：`runOptimizeSchedule`、`applyOptimizeResult`；**内部**：`calculateMetrics`（α/β 惩罚）、`meetsMinimumThreshold`、`buildTeacherConstraints`               |
 | `arrange/batch.js`            | 批量排课                                   | `batchAutoArrange`（从 auto-arrange.js 导入 `batchLocks`）                                                                                                                                                                           |
 | `teaching-arrange.service.js` | 入口转发                                   | 仅 re-export，无业务逻辑                                                                                                                                                                                                             |
 
@@ -336,9 +338,9 @@ for (const ma of manualAssignments) {
 |    阶段    | 处理对象         | 筛选条件                                                                                                                | 说明                           |
 | :--------: | ---------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
 | **阶段 1** | 有指定意向的教师 | `schedulingCollegeIds` 或 `schedulingLevelIds` 非空；本轮已分配教材的教师必须包含当前教材组的教材；0 本教师可拿任意教材 | 严格按意向分配，拿第一本教材   |
-| **阶段 2** | 无指定意向的教师 | 无意向约束；本轮已分配教材的教师必须包含当前教材组的教材；0 本教师可拿任意教材                                          | 按课时容量拿第一本教材         |
+| **阶段 2** | 无指定意向的教师 | 无意向约束；本轮已分配教材的教师必须包含当前教材组的教材；0 本教师可拿任意教材                                          | **教师视角选组**，复用 `takeGroupsForTeacher`（strictPref=false） |
 | **阶段 3** | 所有教师         | 已持有此教材组的教师                                                                                                    | 追加同教材班级（不增加教材数） |
-| **阶段 4** | 所有教师         | 未持有此教材组、有剩余容量、且新增后不超 `MAX_TEXTBOOKS_PER_TEACHER`                                                    | 拿第二本教材                   |
+| **阶段 4** | 所有教师         | 未持有此教材组、有剩余容量、且新增后不超 `MAX_TEXTBOOKS_PER_TEACHER`                                                    | **教师视角选组**，复用 `takeGroupsForTeacher`（吸收原阶段4逻辑） |
 | **阶段 5** | 兜底             | 剩余班级用 `assignRound` 放宽约束处理                                                                                   | 综合评分分配                   |
 
 ### 8.5 阶段内通用逻辑
@@ -355,6 +357,11 @@ for (const ma of manualAssignments) {
 - 有学院意向的教师，只能拿匹配学院的班级
 - 有层次意向的教师，只能拿匹配层次的班级
 - 阶段 1、3、4 使用严格意向检查；阶段 2 关闭严格检查（教师本身无意向）
+
+**语义边界**：`isPrefMatch` 仅检查学院意向和层次意向，**不含教材上限检查与容量约束**。
+教材上限由 `takeClassesForTeacher` 内部的 `useTbLimit` 检查兜底（基于 `projectedTextbooks` 投影集合），
+容量约束由 `takeClassesForTeacher` 的 `remainingCap` 检查兜底。
+`isTeacherEligible` 是更完整的约束检查（含教材+容量），供 `assignRound` 兜底使用。
 
 ### 8.7 兜底分配（`assignRound`，阶段 5）
 
@@ -414,8 +421,8 @@ for (const ma of manualAssignments) {
 | 固有教材匹配   |     +`INHERENT_WEIGHT`（4）      | constants  | 教师固有教材与班级教材有交集（`isTextbookMatch`）                      |
 | 新增教材惩罚   | -`PENALTY_PER_NEW` × N（10 × N） | constants  | 接此班需新增 N 本教材                                                  |
 | 0 本教材奖励   |   +`ZERO_TEXTBOOK_BONUS`（30）   | constants  | 教师尚未持有任何教材                                                   |
-| 同教材追加奖励 |               +10                | **硬编码** | 教师已持有 1 本教材且此班级教材无新增                                  |
-| 新增教材硬淘汰 |          score - 10000           | **硬编码** | 教师已达 `MAX_TEXTBOOKS_PER_TEACHER` 且需新增教材，或 1 本教师接新教材 |
+| 同教材追加奖励 |    +`TEXTBOOK_COUNT_BONUS_1_SAME`（10）    | constants  | 教师已持有 1 本教材且此班级教材无新增                                  |
+| 新增教材强惩罚 | -`TEXTBOOK_COUNT_PENALTY_1_NEW`（300） | constants  | 教师已达 `MAX_TEXTBOOKS_PER_TEACHER` 且需新增教材，或 1 本教师接新教材 |
 
 ### 9.2 教材数量分级奖惩（二轮优化）
 
@@ -424,33 +431,41 @@ for (const ma of manualAssignments) {
 | 教师已有教材数                         | 班级是否新增教材 | 结果                                           |
 | -------------------------------------- | ---------------- | ---------------------------------------------- |
 | 0 本                                   | 任意             | `score += 30`（ZERO_TEXTBOOK_BONUS）           |
-| 1 本                                   | 不新增（同教材） | `score += 10`                                  |
-| 1 本                                   | 新增             | `return score - 10000`（实质禁止）             |
-| ≥ `MAX_TEXTBOOKS_PER_TEACHER`（即 ≥2） | 新增             | `return score - 10000`（实质禁止）             |
+| 1 本                                   | 不新增（同教材） | `score += 10`（TEXTBOOK_COUNT_BONUS_1_SAME）   |
+| 1 本                                   | 新增             | `return score - 300`（软性强惩罚，兜底无其他候选时仍可分配） |
+| ≥ `MAX_TEXTBOOKS_PER_TEACHER`（即 ≥2） | 新增             | `return score - 300`（软性强惩罚；另在 assignRound 候选过滤中被硬排除） |
 | ≥2（不可达分支，仅当调高上限时生效）   | —                | `score -= TEXTBOOK_COUNT_PENALTY_2`（20）      |
 | ≥3（不可达分支）                       | —                | `score -= TEXTBOOK_COUNT_PENALTY_3PLUS`（150） |
 
-> 注：`TEXTBOOK_COUNT_PENALTY_1_NEW` 与 `TEXTBOOK_COUNT_BONUS_1_SAME` 虽在 constants 中定义，但 `calcMatchScore` 实际未使用——同教材奖励与新增教材惩罚均为硬编码值（+10 与 -10000）。
+> 注：同教材奖励与新增教材惩罚均引用 constants 配置（`TEXTBOOK_COUNT_BONUS_1_SAME=10`、`TEXTBOOK_COUNT_PENALTY_1_NEW=300`），早期版本的硬编码 +10 / -10000 已在 P1-4 修复中移除。-300 为软性强惩罚（≈ 理论最大正分 57 的 5.3 倍），非实质禁止：兜底阶段无其他候选时仍可分配。
 
 ### 9.3 教师选择（`selectBestTeacher`）
 
+> **F5 修复**：原阈值分段比较器存在非传递性（a>b, b>c, c>a）导致 `Array.prototype.sort` 结果与 V8 引擎实现相关。
+> 改为**严格弱序比较器**（strict weak ordering），通过分档 + 确定性兜底消除歧义：
+
 ```javascript
+const st = WORKLOAD_BALANCE.SCORE_THRESHOLD; // 1
+const lt = WORKLOAD_BALANCE.LOAD_RATE_THRESHOLD; // 0.2
 const sorted = [...candidates].sort((a, b) => {
-  // 1. 分数差异 ≥ SCORE_THRESHOLD（1），按分数降序
-  if (Math.abs(b.score - a.score) >= WORKLOAD_BALANCE.SCORE_THRESHOLD) {
-    return b.score - a.score;
-  }
-  // 2. 负载率差异 > LOAD_RATE_THRESHOLD（0.2），按负载率升序（低负载优先）
-  if (
-    Math.abs(a.loadRate - b.loadRate) > WORKLOAD_BALANCE.LOAD_RATE_THRESHOLD
-  ) {
-    return a.loadRate - b.loadRate;
-  }
-  // 3. 综合排序：分数降序 > 负载率升序
-  return b.score - a.score || a.loadRate - b.loadRate;
+  // 1. 评分分档降序（同档内差异 < st 视为等价）
+  const scoreBucketA = Math.floor(a.score / st);
+  const scoreBucketB = Math.floor(b.score / st);
+  if (scoreBucketA !== scoreBucketB) return scoreBucketB - scoreBucketA;
+  // 2. 负载率分档升序（同档内差异 < lt 视为等价，低负载优先）
+  const loadBucketA = Math.floor(a.loadRate / lt);
+  const loadBucketB = Math.floor(b.loadRate / lt);
+  if (loadBucketA !== loadBucketB) return loadBucketA - loadBucketB;
+  // 3. 确定性兜底：原始评分降序 → 负载率升序 → 教师 ID 升序
+  if (b.score !== a.score) return b.score - a.score;
+  if (a.loadRate !== b.loadRate) return a.loadRate - b.loadRate;
+  return (a.teacher?.id ?? 0) - (b.teacher?.id ?? 0);
 });
 return sorted[0];
 ```
+
+比较顺序：**scoreBucket → loadBucket → score → loadRate → teacherId**，
+前 4 级无法决断时用教师 ID 升序兜底，保证排序结果完全确定。
 
 ### 9.4 负载率计算
 
@@ -529,9 +544,11 @@ supplyDemandRatio = demand / supplyCapacity   (teacherCount=0 时为 MAX_SAFE_IN
 
 ## 十二、预览模式
 
+> 说明：预览现仅作为算法内部 dry-run 机制使用（批量排课补漏轮 F8 落库前评估、单元测试驱动算法主流程），前端排课预览入口与 API 层 `preview` 请求参数已移除。
+
 ### 12.1 行为
 
-当请求参数 `preview = true` 时：
+当内部选项 `options.preview = true` 时：
 
 - 算法完整执行（所有计算、匹配、评分、置换）
 - **跳过数据库事务**——不删除、不插入
@@ -708,6 +725,14 @@ cohesion = max(0, 1 - (教材数 - 1) / 班级数)
                               └──────┬─────┘
                                      │
                                      ▼
+                    ┌──────────────────────────┐
+                    │ 后置优化层（禁忌搜索）   │
+                    │ 可选，独立于 phase 1-5   │
+                    │ (tabuOptimize /          │
+                    │  runOptimizeSchedule)    │
+                    └──────────────────────────┘
+                                   │
+                                   ▼
                     ┌───────────────────────────┐
                     │    诊断未分配班级原因       │
                     │    生成排课结果             │
@@ -755,13 +780,12 @@ export const TEXTBOOK_COHESION = {
   INHERENT_WEIGHT: 4, // 固有教材权重
   PENALTY_PER_NEW: 10, // 新增教材每本扣分
   ZERO_TEXTBOOK_BONUS: 30, // 0本教师加分
-  TEXTBOOK_COUNT_PENALTY_1_NEW: 200, // 未使用：代码用硬编码 -10000
-  TEXTBOOK_COUNT_BONUS_1_SAME: 8, // 未使用：代码用硬编码 +10
+  TEXTBOOK_COUNT_PENALTY_1_NEW: 300, // 1本教师接不同教材强力惩罚
+  TEXTBOOK_COUNT_BONUS_1_SAME: 10, // 1本教师接同类加分
   TEXTBOOK_COUNT_PENALTY_2: 20, // 不可达：MAX_TEXTBOOKS_PER_TEACHER=2
   TEXTBOOK_COUNT_PENALTY_3PLUS: 150, // 不可达：同上
   MAX_TEXTBOOKS_PER_TEACHER: 2, // 硬上限
-  COHESION_PHASE_ENABLED: true, // 未使用：phase2.5 已废弃
-  PHASE0_ENABLED: false, // 未使用：旧 Phase 0 已关闭
+  // F14 修复：移除 COHESION_PHASE_ENABLED / PHASE0_ENABLED（v2 重写后无生产代码引用）
   FALLBACK_EMPTY: true, // 无排课记录教师教材为空集合
   SCATTERED_THRESHOLD: 3, // 教材数 >= 此值视为"分散"
 };
@@ -778,17 +802,15 @@ export const TEXTBOOK_COHESION = {
 | `INHERENT_WEIGHT`              |   4    |    ✅    | calcMatchScore 固有教材        |
 | `PENALTY_PER_NEW`              |   10   |    ✅    | calcMatchScore 新增教材惩罚    |
 | `ZERO_TEXTBOOK_BONUS`          |   30   |    ✅    | calcMatchScore 0本教师加分     |
-| `TEXTBOOK_COUNT_PENALTY_1_NEW` |  200   |    ❌    | calcMatchScore 用硬编码 -10000 |
-| `TEXTBOOK_COUNT_BONUS_1_SAME`  |   8    |    ❌    | calcMatchScore 用硬编码 +10    |
+| `TEXTBOOK_COUNT_PENALTY_1_NEW` |  300   |    ✅    | calcMatchScore 1本教师接新教材强惩罚 |
+| `TEXTBOOK_COUNT_BONUS_1_SAME`  |   10   |    ✅    | calcMatchScore 1本教师接同教材奖励 |
 | `TEXTBOOK_COUNT_PENALTY_2`     |   20   |    ❌    | maxTb=2 时不可达               |
 | `TEXTBOOK_COUNT_PENALTY_3PLUS` |  150   |    ❌    | maxTb=2 时不可达               |
 | `MAX_TEXTBOOKS_PER_TEACHER`    |   2    |    ✅    | 多处硬上限校验                 |
-| `COHESION_PHASE_ENABLED`       |  true  |    ❌    | phase2.5 已废弃                |
-| `PHASE0_ENABLED`               | false  |    ❌    | 旧 Phase 0 已关闭              |
 | `FALLBACK_EMPTY`               |  true  |    ✅    | 兜底教材推导                   |
 | `SCATTERED_THRESHOLD`          |   3    |    ✅    | 内聚度统计                     |
 
-> 注：`TEXTBOOK_COUNT_PENALTY_1_NEW`、`TEXTBOOK_COUNT_BONUS_1_SAME` 等配置项虽在 constants 中定义，但 `calcMatchScore` 实际使用硬编码值。调整这些配置项不会影响实际评分。
+> 注：`TEXTBOOK_COUNT_PENALTY_2`、`TEXTBOOK_COUNT_PENALTY_3PLUS` 仅在 `MAX_TEXTBOOKS_PER_TEACHER ≥ 3` 时可达，当前默认值为 2，调整这两项不会影响实际评分。
 
 ### 16.5 批量排课
 
@@ -797,8 +819,81 @@ export const TEXTBOOK_COHESION = {
 | `BATCH_TIMEOUT_MS` | `5 * 60 * 1000`（5 分钟） | 批量排课超时上限 |
 
 ---
+## 十七、排课优化服务（`optimize.js`）
 
-## 十七、API 接口
+### 17.1 概述
+
+`server/src/services/arrange/optimize.js` 提供跨课程全局优化服务，作为五阶段贪心排课（phase 1-5）的**独立后置优化层**。
+与单课程禁忌搜索（`tabu-search.js` 的 `tabuOptimize`）的区别：optimize.js 在学期维度上聚合所有课程的自动排课记录，
+逐课程调用 `tabuOptimize` 并在课程间同步教师状态，实现跨课程负载均衡与教材内聚优化。
+
+**导出 API**：
+- `runOptimizeSchedule(semesterId, mode, options)`：预览模式运行全局优化，返回 before/after 指标与变更详情
+- `applyOptimizeResult(semesterId, changes, userId)`：将变更应用到 `teaching_assignments` 表，并写入审计日志
+
+### 17.2 `runOptimizeSchedule` 流程
+
+1. **加载当前排课**：查询 `teaching_assignments`（`is_locked=false` 且 `is_auto=true`）
+2. **按课程分组**：构建 `courseMap`（courseId → assignments / classIds / teacherIds）
+3. **批量加载班级与教材**：通过 `plan_courses` → `plan_course_semesters` → `plan_textbooks` 关联，
+   **N+1 → 批量查询**（原实现按课程循环内逐班 `findUnique`，现为 `findMany` + Map 查找）
+4. **构建全局 `teacherConstraints`**：`buildTeacherConstraints` 与 `auto-arrange.js` 字段对齐
+   （含 `inherentTextbookIds` 快照、`schedulingCollegeIds` / `schedulingLevelIds`、`courses` 授课资格）
+5. **计算 before 指标**：`calculateMetrics` 返回 score / loadVariance / textbookCohesionRate
+6. **逐课程运行 `tabuOptimize`**：每门课程创建独立教师约束副本，防止 writeback 污染共享状态；
+   **容量修正**：将 `standardCap` / `fullCap` 重算为「排除本课后」的可用容量，与 `auto-arrange.js` 的 `effectiveTotal` 思路对齐
+7. **跨课程状态回写**（L549-567）：每门课程优化后，将 `courseTeacherConstraints` 的增量状态同步回 `teacherConstraints`：
+   - `assignedTextbookIds`：直接替换为优化后的值
+   - `assignedCollegeIds`：只增不减（保守策略，与 tabu-search writeback 一致）
+8. **构建变更详情**：对比 original 与 optimized 的 `teacher_id` 差异；
+   **`teacherNameMap` 优化**（L600）：预构建 `teacherId → name` 的 Map，避免 O(T) 线性查找
+9. **阈值判定**：`meetsMinimumThreshold` 决定是否值得应用变更
+10. **应用变更**：`applyOptimizeResult` 在事务中 `updateMany` 按唯一键 `(class_id, course_id, semester, teacher_id)` 定位
+
+### 17.3 `calculateMetrics` 与 α/β 惩罚
+
+```
+score = totalMatchScore − α × underAssignmentGap − β × loadVariance × 100
+```
+
+| 项                       | 来源                                         |
+| ------------------------ | ------------------------------------------ |
+| `totalMatchScore`        | 对每条分配调用 `calcMatchScore` 求和（proxy 教师对象） |
+| `underAssignmentPenalty` | 每位教师 `max(0, cap − assignedHours) × α`  |
+| `loadVariancePenalty`    | `β × loadVariance × 100`（量级与 `computeObjective` 对齐） |
+
+P1 修复：与 `tabu-search.js` 的 `computeObjective` 对齐，避免 UI 显示与算法结果矛盾。
+
+### 17.4 `meetsMinimumThreshold` 阈值逻辑
+
+P2 修复：原 `&&` 关系导致 2 个班级的有效 Swap 被丢弃，改为加权判定：
+
+```javascript
+function meetsMinimumThreshold(before, after) {
+  const changesCount = after.changesCount || 0;
+  // P2 修复：>0 改为 !== 0，避免 before.score 为负数时（含 α/β 惩罚）
+  //         负分→正分的巨大改进被误判为 0%
+  const scoreImprovement = before.score !== 0
+    ? ((after.score - before.score) / Math.abs(before.score)) * 100
+    : 0;
+  // && 改为 ||：scoreImprovement > 5% 或 (changesCount >= 3 且 scoreImprovement > 2%)
+  return scoreImprovement > 5 || (changesCount >= 3 && scoreImprovement > 2);
+}
+```
+
+两处关键修复：
+1. **`&&` → `||`**：放宽阈值，避免小规模有效变更被整体丢弃
+2. **`> 0` → `!== 0`**：新目标函数含 α/β 惩罚项，`before.score` 可能为负数；
+   用 `> 0` 守卫会让负分→正分的巨大改进被误判为 0% 改进而被丢弃
+
+### 17.5 已知限制
+
+- **跨课程公平性缺失**：逐课程串行优化，先优化课程的状态会影响后续课程的教师可用容量（与 `auto-arrange.js` 单课程独立排课同款限制）
+- **不处理合班**：`runOptimizeSchedule` 不展开 `combination_id`，合班变更需在上层处理
+
+---
+
+## 十八、API 接口
 
 | 方法   | 路径                  | 说明             | 权限     |
 | ------ | --------------------- | ---------------- | -------- |
@@ -812,40 +907,44 @@ export const TEXTBOOK_COHESION = {
 | POST   | `/reset`              | 重置自动排课     | admin+   |
 | PUT    | `/hour-settings`      | 保存课时设置     | admin+   |
 | DELETE | `/assignments/:id`    | 删除排课记录     | admin+   |
+| PATCH  | `/assignments/:id/lock` | 锁定/解锁单条排课 | admin+   |
+| POST   | `/lock-batch`         | 批量锁定/解锁    | admin+   |
+| POST   | `/optimize-schedule`  | 排课优化（试算） | admin+   |
+| POST   | `/apply-optimize`     | 应用优化结果     | admin+   |
 
 ---
 
-## 十八、已知限制
+## 十九、已知限制
 
-### 18.1 贪心算法无回溯
+### 19.1 贪心算法无回溯
 
 一旦教师被分配给某班级，不会被撤回以寻求全局更优解（置换回溯仅单轮，不递归）。结果是局部最优，非全局最优。
 
-### 18.2 跨课程公平性缺失
+### 19.2 跨课程公平性缺失
 
 每门课程独立排课。在批量排课中，先处理的课程可能占用大量教师容量，导致后续课程的教师选择受限。批量排课通过"供需比降序"排序缓解此问题，但无法完全消除。
 
-### 18.3 教材数量分级奖惩部分未启用
+### 19.3 教材数量分级奖惩部分未启用
 
 `TEXTBOOK_COUNT_PENALTY_2` 与 `TEXTBOOK_COUNT_PENALTY_3PLUS` 仅在 `MAX_TEXTBOOKS_PER_TEACHER ≥ 3` 时生效。当前默认值为 2，这两个分支不可达。
 
-### 18.4 `defaultWeeklyHours` 语义
+### 19.4 `defaultWeeklyHours` 语义
 
 字段名"默认周课时"具有误导性，实际作用是**教师总周课时上限**（跨所有课程，含手动排课与其他课程）。UI 中已重命名为"自定义课时"。
 
-### 18.5 并发锁为进程级别
+### 19.5 并发锁为进程级别
 
 `arrangeLocks` 与 `batchLocks` 均为进程内存级别，仅适用于单进程部署。多实例部署需改用分布式锁。
 
-### 18.6 批量排课无教材分组预处理
+### 19.6 批量排课无教材分组预处理
 
 `batch.js` 仅按课程供需比排序，不做教材分组。教材分组完全由 `autoArrange` 内部完成。
 
 ---
 
-## 十九、测试验证
+## 二十、测试验证
 
-### 19.1 验证场景
+### 20.1 验证场景
 
 #### 场景1：有指定意向的教师
 
@@ -867,7 +966,7 @@ export const TEXTBOOK_COHESION = {
 - **前提**：教师D 已分配职教学院班级；班级1-3 职教学院教材X；班级4-6 普教学院教材X
 - **预期**：教师D 优先拿职教学院的班级（1-3），只有在职教学院班级分配完后才拿普教学院的班级
 
-### 19.2 验证步骤
+### 20.2 验证步骤
 
 1. 启动开发环境
 2. 进入"教学安排"页面
@@ -878,7 +977,7 @@ export const TEXTBOOK_COHESION = {
    - 同教材的班级是否尽量分配给同一教师
    - 同学院的班级是否尽量分配给同一教师
 
-### 19.3 日志查看
+### 20.3 日志查看
 
 排课过程中会输出详细日志：
 
@@ -897,7 +996,7 @@ export const TEXTBOOK_COHESION = {
 
 ---
 
-## 二十、常见问题
+## 二十一、常见问题
 
 ### Q1：为什么有指定意向的教师没有被分配到任何班级？
 
@@ -923,17 +1022,17 @@ export const TEXTBOOK_COHESION = {
 
 ---
 
-## 二十一、性能优化建议
+## 二十二、性能优化建议
 
-### 21.1 大数据量场景
+### 22.1 大数据量场景
 
 当班级数量超过 100 时，建议：
 
 1. **分批排课**：按学院或层次分批排课，减少单次处理的班级数量
-2. **预览模式**：先用预览模式查看排课结果，确认无误后再正式排课
+2. **锁定关键分配**：对满意的排课结果及时锁定，重新排课时不会被覆盖
 3. **单课程排课**：对于重要课程，单独排课而非批量排课
 
-### 21.2 日志优化
+### 22.2 日志优化
 
 生产环境中，建议降低日志级别：
 
@@ -947,15 +1046,15 @@ logger.debug("[阶段1] 有指定意向的教师拿第一本教材");
 
 ---
 
-## 二十二、禁忌搜索优化层（v2.21.0 新增）
+## 二十三、禁忌搜索优化层（v2.21.0 新增）
 
-### 22.1 概述
+### 23.1 概述
 
 v2.21.0 新增了可选的禁忌搜索优化层，作为五阶段贪心算法的后续优化。贪心算法快速生成初始解，禁忌搜索在此基础上通过邻域搜索迭代优化，提升排课质量。
 
 默认关闭，可通过系统设置页面动态启用（`system_settings` 表 key=`tabu_search_enabled`），也可通过常量 `TABU_SEARCH.ENABLED` 静态开启。
 
-### 22.2 算法流程
+### 23.2 算法流程
 
 ```
 五阶段贪心（构造初始解）
@@ -967,7 +1066,7 @@ v2.21.0 新增了可选的禁忌搜索优化层，作为五阶段贪心算法的
 输出最终结果
 ```
 
-### 22.3 邻域移动算子
+### 23.3 邻域移动算子
 
 | 移动类型 | 操作                       | 说明                             |
 | -------- | -------------------------- | -------------------------------- |
@@ -977,7 +1076,7 @@ v2.21.0 新增了可选的禁忌搜索优化层，作为五阶段贪心算法的
 
 每次移动后检查硬约束（容量上限、教材上限 `MAX_TEXTBOOKS_PER_TEACHER`、学院/层次意向），不可行的移动直接跳过。
 
-### 22.4 核心机制
+### 23.4 核心机制
 
 - **禁忌表**：记录最近 N 轮被移动的 `(classId, teacherId)` 对，防止局部震荡。默认 tenure=10
 - **Aspiration Criterion**：被禁忌的移动如果能产生优于历史最优的解，则忽略禁忌
@@ -985,7 +1084,7 @@ v2.21.0 新增了可选的禁忌搜索优化层，作为五阶段贪心算法的
 - **学院集合维护**：Swap 评估时保存/恢复学院集合，防止累积污染
 - **教材 writeback 增量保护**：搜索结束后仅写回增量变化，不替换整个 `assignedTextbookIds`
 
-### 22.5 配置参数
+### 23.5 配置参数
 
 | 参数                       | 默认值  | 说明                         |
 | -------------------------- | ------- | ---------------------------- |
@@ -995,36 +1094,51 @@ v2.21.0 新增了可选的禁忌搜索优化层，作为五阶段贪心算法的
 | `NO_IMPROVEMENT_LIMIT`     | `80`    | 连续无改进轮数上限           |
 | `SINGLE_COURSE_TIMEOUT_MS` | `15000` | 单课程优化超时（毫秒）       |
 | `UNASSIGNED_PENALTY`       | `500`   | 未分配班级惩罚分             |
+| `UNDER_ASSIGNMENT_PENALTY` | `5`     | 欠分配课时惩罚（α 系数）     |
+| `LOAD_VARIANCE_WEIGHT`     | `2`     | 负载方差惩罚权重（β 系数）   |
+| `RANDOM_SEED`              | `42`    | 固定种子（mulberry32 PRNG）  |
+
+**目标函数**（`computeObjective` / `calculateMetrics`）：
+
+```
+score = totalMatchScore − α × underAssignmentGap − β × loadVariance × 100
+```
+
+- α = `UNDER_ASSIGNMENT_PENALTY`（5）：每位教师低于 cap 的课时缺口 × α
+- β = `LOAD_VARIANCE_WEIGHT`（2）：教师间负载方差的惩罚权重，促进工作量均衡
+
+伪随机数采用 **mulberry32** 算法，种子由 `RANDOM_SEED`（42）固定，保证同输入结果可复现；
+`RANDOM_SEED = 0` 时退化为 `Math.random()`。
 
 配置位于 `server/src/constants/index.js` 的 `TABU_SEARCH` 对象。
 
-### 22.6 错误处理
+### 23.6 错误处理
 
 禁忌搜索异常不会影响排课结果。所有禁忌搜索逻辑被 `try/catch` 包裹，异常时自动跳过，返回贪心初始解。日志中会记录异常信息。
 
-### 22.7 前端管理
+### 23.7 前端管理
 
 在系统设置页面新增了"排课禁忌搜索优化"开关（`SchedulingConfig.vue` 组件），使用 `el-switch` 控件，独立保存，支持脏状态跟踪。
 
 ---
 
-## 二十三、未来优化方向
+## 二十四、未来优化方向
 
-### 23.1 更高级的全局优化
+### 24.1 更高级的全局优化
 
 v2.21.0 已实现禁忌搜索作为局部搜索优化层。未来可以考虑：
 
 1. **模拟退火**：以一定概率接受劣解，避免陷入局部最优
 2. **遗传算法**：适合多目标优化，但实现复杂、调参多
 
-### 23.2 跨课程均衡
+### 24.2 跨课程均衡
 
 当前算法是单课程独立排课。未来可以考虑：
 
 1. **教师工作量均衡**：跨课程考虑教师的总工作量
 2. **教材分布均衡**：避免某教师在同一学期教过多不同教材的课程
 
-### 23.3 用户偏好学习
+### 24.3 用户偏好学习
 
 通过学习历史排课数据，自动调整：
 
@@ -1033,7 +1147,7 @@ v2.21.0 已实现禁忌搜索作为局部搜索优化层。未来可以考虑：
 
 ---
 
-## 二十四、关键代码位置索引
+## 二十五、关键代码位置索引
 
 | 功能                                   | 文件                         | 行号(约)     |
 | -------------------------------------- | ---------------------------- | ------------ |
@@ -1068,8 +1182,59 @@ v2.21.0 已实现禁忌搜索作为局部搜索优化层。未来可以考虑：
 | **Aspiration Criterion**               | **`arrange/tabu-search.js`** | **各邻域内** |
 | **TABU_SEARCH 配置**                   | **`constants/index.js`**     | **~115-125** |
 | 批量排课 `batchAutoArrange`            | `arrange/batch.js`           | 14-182       |
+| **排课优化 `runOptimizeSchedule`**     | **`arrange/optimize.js`**   | **241-665**  |
+| **优化指标 `calculateMetrics`**      | **`arrange/optimize.js`**   | **33-143**   |
+| **改进阈值 `meetsMinimumThreshold`** | **`arrange/optimize.js`**   | **21-28**    |
+| **跨课程状态回写**                   | **`arrange/optimize.js`**   | **549-567**  |
+| **N+1 → 批量查询**                  | **`arrange/optimize.js`**   | **333-394**  |
+| **`teacherNameMap` 优化**           | **`arrange/optimize.js`**   | **600**      |
 | 配置 `TEXTBOOK_COHESION`               | `constants/index.js`         | 92-114       |
+
+## 二十六、固有班级延续（v1.7.0 新增）
+
+### 26.1 概述
+
+"固有班级延续"是一个**可选的软优先策略**：排课下学期时，优先将教师分配到他上学期教过的班级（即"固有班级"）。开关为系统设置项 `inherent_class_enabled`（默认关闭），由系统设置页"排课配置"卡片控制。
+
+设计原则：**纯软性优先，不构成硬约束**。容量、资格（学院/层次）、教材惩罚、手动锁定等既有规则全部不变，延续偏好只影响同等条件下的排序与评分。
+
+### 26.2 快照构建
+
+- 上学期推算：`semester.service.js` 的 `getPreviousSemester`（春季 N=2 → 本学年秋季 N=1；秋季 N=1 → 上一学年春季，年份越界返回 null）。
+- 快照来源：查询上学期该课程的 `teaching_assignments`（teacher_id → class_id 集合），构建 Map：`courseId → Map(teacherId → Set(classId))`，挂到教师约束对象的 `inherentClassIds` 字段（每教师独立副本，防止补排多轮间共享 Set 污染）。
+- 批量排课在入口处**一次性预加载**上学期全部排课记录（单条 SQL），按课程切分后透传给各次 `autoArrange` 调用，避免逐课程重复查库；单课程排课自行查询。
+- 快照缺失或查询失败时自动降级为普通排课，不影响主流程。
+
+### 26.3 生效点位
+
+1. **评分**（`calcMatchScore`）：教师命中固有班级时 `+INHERENT_CLASS.CONTINUITY_WEIGHT`（=8）。高于学院/层次匹配权重（各 5），但远低于教材强惩罚（-300），即教材内聚目标仍占主导。
+2. **拿班顺序**（`takeClassesForTeacher`）：固有班级排序前置，先于学院优先规则，再进入既有的 matchHours 最大化逻辑。
+3. **禁忌搜索**：`buildScoringProxy` 通过展开运算符透传教师字段，`inherentClassIds` 自动参与评分，无需额外改动。
+4. **排课优化**（`optimize.js`）：按课程注入 `inherentClassIds` 到课程级约束副本；前后指标评估使用不含快照的全局约束，保证阈值口径一致。
+
+### 26.4 开关语义
+
+- 开关在每次排课调用入口读取一次，同一次批量排课内不重复读取，避免中途改开关导致批次内口径不一致。
+- 静态常量 `INHERENT_CLASS.ENABLED` 默认 `false`；`system_settings.inherent_class_enabled` 为动态开关，DB 查询失败时保持关闭。
+- 即使开关打开，若目标课程上学期无排课记录（首学期开设、上学期未排等），该课程也自然走普通排课。
+
+### 26.5 结果统计
+
+开关生效且存在快照时，排课结果附带 `inherentContinuity`：
+
+- `candidateCount`：本次已分配班级中，上学期存在任教记录的数量；
+- `continuedCount`：其中仍分配给原任课教师的数量；
+- `continuityRate`：延续率百分比（candidateCount 为 0 时为 null）。
+
+### 26.6 持久化标记（`is_inherent`，v1.8.0 新增）
+
+`teaching_assignments.is_inherent` 布尔列记录"该条安排是延续上学期的教师-班级关系"：
+
+- **写入**：排课结束时（tabu 优化/置换回溯之后）统一按快照计算最终标记，随自动排课记录一起持久化；预览结果同样计算并返回（场景一弹窗展示）。
+- **失效语义**：手动安排/更换教师覆盖延续记录时清为 `false`；排课优化置换教师后按快照重算（新教师上学期教过该班才保持）；自动重排会先删除旧自动安排再重写，标记随新结果重新计算。
+- **展示**：教学安排班级表教师标签旁紫色 `RefreshRight` 图标（tooltip 说明）；结果弹窗延续率统计块；课程预览卡"延续率"统计项（延续班级数 / 已安排班级数）；课程概览接口返回 `inherentCount`。
+- **关闭开关**：不产生任何 `true` 标记，历史标记不受影响（只读展示，随下次重排自然清除）。
 
 ---
 
-_文档版本：v1.3.0 | 最后更新：2026-07-23_
+_文档版本：v1.8.0 | 最后更新：2026-08-12_

@@ -92,12 +92,16 @@ export default withMermaid(
             { text: '平台说明', link: '/kec/kec-manager' },
             // 部署与运维
             { text: '部署与运维指南', link: '/kec/deployment' },
+            { text: 'Docker 部署指南', link: '/kec/docker_deployment' },
+            { text: 'Docker 部署检查清单', link: '/kec/docker_checklist' },
             // 核心算法
             { text: '排课算法完整说明', link: '/kec/scheduling_algorithm' },
+            { text: '排课算法审查报告', link: '/kec/scheduling_algorithm_audit' },
             // 技术专题
             { text: '学期计算逻辑', link: '/kec/semester-calculation' },
             { text: '代码格式化指南', link: '/kec/code_formatting' },
             { text: '命名规范迁移', link: '/kec/naming_convention_migration' },
+            { text: '微信小程序评估报告', link: '/kec/miniprogram-assessment' },
             // 变更
             { text: '版本管理指南', link: '/kec/version_management' },
             { text: '变更日志', link: '/kec/changelog' },

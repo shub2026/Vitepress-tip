@@ -60,15 +60,25 @@ currentSemesterNum = (grade - 1) * 2 + semesterIndex;
 ### 前端计算
 
 - **文件**: `client/src/views/class/components/ClassTable.vue`
-- **函数**: `calcGrade(row, semesterInfo)`
+- **函数**: `calcGrade(row)`
 - **用途**: 班级列表显示年级
-- **逻辑**:
+- **逻辑**: 直接使用后端计算的 `grade` 字段，前端不再重复实现公式（FR3 修复，消除重复公式和硬编码边界月）：
   ```javascript
-  // 优先使用后端提供的学期信息
-  const startYear = semesterInfo?.startYear || estimateStartYear();
-  const grade = startYear - enrollmentYear + 1;
-  return grade >= 1 ? grade : null; // 始终显示年级，不限制毕业状态
+  // 年级由后端列表接口统一计算（含学制上限/未入学过滤），无值时显示“-”
+  function calcGrade(row) {
+    return row.grade ?? null;
+  }
   ```
+
+### 本地回退学期计算（1 月归属规则）
+
+- **文件**: `client/src/composables/useSemesters.js`
+- **函数**: `getCurrentSemester(semesterStartMonth = 8)`
+- **用途**: 后端系统设置不可用时，按本地日期推算当前学期
+- **归属规则**：
+  - `month >= semesterStartMonth`（默认 8 月）：当年秋季第 1 学期 `YYYY-(YYYY+1)-1`
+  - `month === 1`：仍处秋季学期末（期末考试周），归**上一学年第 1 学期** `(YYYY-1)-YYYY-1`，对齐本文档“秋季 = 9 月-次年 1 月”口径
+  - 其余月份（2–7 月）：上一学年春季第 2 学期 `(YYYY-1)-YYYY-2`
 
 ### 格式化显示
 
@@ -223,7 +233,7 @@ status = grade <= durationYears ? "active" : "graduated";
 
 **导入计算**:
 
-- 文件: `server/src/routes/import.routes.js`
+- 文件: `server/src/controllers/import/classes.js`
 - 用途: Excel批量导入班级时自动计算状态
 
 ## 培养方案课程匹配
@@ -268,6 +278,10 @@ const planCourses = plan.planCourses.filter(
 - 3年级对应学期 5-6
 
 ## 修改记录
+
+- **审计修复批次**:
+  - 更新“前端计算”一节：`calcGrade` 已改为直接使用后端 `grade` 字段（FR3 修复）
+  - 新增“本地回退学期计算”一节：`useSemesters.js` 的 1 月归上一学年第 1 学期规则
 
 - **2026-06-28 (H2 修复)**:
   - 新增“学期格式校验规则”章节，文档化 `parseSemester` 年份连续性校验
